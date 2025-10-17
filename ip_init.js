@@ -12,8 +12,8 @@ const csvFilePath = path.resolve(__dirname, "init.csv");
 const txtFilePath = path.resolve(__dirname, "ip.txt");
 
 // 提取列
-const ipcom = "ip";
-const portcom = "port";
+const ipcom = "IP地址";
+const portcom = "端口号";
 async function extractIpAndPort() {
   try {
     // 读取 CSV 文件内容

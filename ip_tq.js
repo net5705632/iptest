@@ -89,7 +89,6 @@ class CSVProcessor {
     const countryMatch = this.locations.find(loc => 
       loc.cca2 === bronIpLocatie
     );
-    
     return countryMatch ? `${countryMatch.emoji}${countryMatch.country}` : "Unknown";
   }
 
