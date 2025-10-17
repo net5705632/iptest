@@ -4,7 +4,7 @@ import url from "node:url";
 
 // 配置参数
 const CONFIG = {
-  perCountryCount: 5,      // 每个国家提取数量，0表示不限制
+  perCountryCount: 0,      // 每个国家提取数量，0表示不限制
   filterBySpeed: false,    // 是否过滤下载速度
   minSpeed: 0,             // 过滤下载速度下限，单位kb/s
   targetFile: "ip_tq.csv"  // 指定要处理的CSV文件名
