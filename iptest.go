@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
@@ -24,9 +23,8 @@ import (
 )
 
 const (
-	requestURL  = "speed.cloudflare.com/cdn-cgi/trace" // 请求trace URL
-	timeout     = 1 * time.Second                      // 超时时间
-	maxDuration = 2 * time.Second                      // 最大持续时间
+	timeout     = 1 * time.Second // 超时时间
+	maxDuration = 2 * time.Second // 最大持续时间
 )
 
 var (
@@ -36,21 +34,22 @@ var (
 	speedTest    = flag.Int("speedtest", 5, "下载测速协程数量,设为0禁用测速")                                // 下载测速协程数量
 	speedTestURL = flag.String("url", "speed.cloudflare.com/__down?bytes=500000000", "测速文件地址") // 测速文件地址
 	enableTLS    = flag.Bool("tls", true, "是否启用TLS")                                           // TLS是否启用
-	delay = flag.Int("delay", 0, "延迟阈值(ms)，默认为0禁用延迟过滤")                           // 默认0，禁用过滤
+	TCPurl       = flag.String("tcpurl", "speed.cloudflare.com", "TCP请求地址")                   // TCP请求地址
+	delay        = flag.Int("delay", 0, "延迟阈值(ms)，默认为0禁用延迟过滤")                               // 默认0，禁用过滤
 )
 
 type result struct {
-	ip          string        // IP地址
-	port        int           // 端口
-	dataCenter  string        // 数据中心
+	ip         string        // IP地址
+	port       int           // 端口
+	dataCenter string        // 数据中心
 	locCode    string        // 源IP位置
-	region      string        // 地区
-	city        string        // 城市
-	region_zh      string        // 地区
-	country        string        // 国家
-	city_zh      string        // 城市
+	region     string        // 地区
+	city       string        // 城市
+	region_zh  string        // 地区
+	country    string        // 国家
+	city_zh    string        // 城市
 	emoji      string        // 国旗
-	latency     string        // 延迟
+	latency    string        // 延迟
 	tcpDuration time.Duration // TCP请求延迟
 }
 
@@ -60,16 +59,16 @@ type speedtestresult struct {
 }
 
 type location struct {
-	Iata   string  `json:"iata"`
-	Lat    float64 `json:"lat"`
-	Lon    float64 `json:"lon"`
-	Cca2   string  `json:"cca2"`
-	Region string  `json:"region"`
-	City   string  `json:"city"`
-	Region_zh string  `json:"region_zh"`
-	Country   string  `json:"country"`
-	City_zh string  `json:"city_zh"`
-	Emoji   string  `json:"emoji"`
+	Iata     string  `json:"iata"`
+	Lat      float64 `json:"lat"`
+	Lon      float64 `json:"lon"`
+	Cca2     string  `json:"cca2"`
+	Region   string  `json:"region"`
+	City     string  `json:"city"`
+	Region_zh string `json:"region_zh"`
+	Country  string  `json:"country"`
+	City_zh  string  `json:"city_zh"`
+	Emoji    string  `json:"emoji"`
 }
 
 // 尝试提升文件描述符的上限
@@ -90,8 +89,11 @@ func main() {
 
 	startTime := time.Now()
 	osType := runtime.GOOS
-	if osType == "linux" {
+	// 如果是linux系统且以root用户运行，尝试提升文件描述符的上限
+	if osType == "linux" && os.Getuid() == 0 {
 		increaseMaxOpenFiles()
+	} else if osType == "linux" {
+		fmt.Println("非root用户运行，跳过文件描述符上限提升")
 	}
 
 	var locations []location
@@ -102,10 +104,13 @@ func main() {
 			fmt.Printf("无法从URL中获取JSON: %v\n", err)
 			return
 		}
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				fmt.Printf("关闭响应体时出错: %v\n", err)
+			}
+		}()
 
-		defer resp.Body.Close()
-
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			fmt.Printf("无法读取响应体: %v\n", err)
 			return
@@ -116,18 +121,24 @@ func main() {
 			fmt.Printf("无法解析JSON: %v\n", err)
 			return
 		}
+		
 		file, err := os.Create("locations.json")
 		if err != nil {
 			fmt.Printf("无法创建文件: %v\n", err)
 			return
 		}
-		defer file.Close()
+		defer func() {
+			if err := file.Close(); err != nil {
+				fmt.Printf("关闭文件时出错: %v\n", err)
+			}
+		}()
 
 		_, err = file.Write(body)
 		if err != nil {
 			fmt.Printf("无法写入文件: %v\n", err)
 			return
 		}
+		fmt.Println("locations.json 下载完成")
 	} else {
 		fmt.Println("本地 locations.json 已存在,无需重新下载")
 		file, err := os.Open("locations.json")
@@ -135,9 +146,13 @@ func main() {
 			fmt.Printf("无法打开文件: %v\n", err)
 			return
 		}
-		defer file.Close()
+		defer func() {
+			if err := file.Close(); err != nil {
+				fmt.Printf("关闭文件时出错: %v\n", err)
+			}
+		}()
 
-		body, err := ioutil.ReadAll(file)
+		body, err := io.ReadAll(file)
 		if err != nil {
 			fmt.Printf("无法读取文件: %v\n", err)
 			return
@@ -168,7 +183,7 @@ func main() {
 
 	thread := make(chan struct{}, *maxThreads)
 
-	var count int
+	var count int32
 	total := len(ips)
 
 	for _, ip := range ips {
@@ -177,11 +192,12 @@ func main() {
 			defer func() {
 				<-thread
 				wg.Done()
-				count++
-				percentage := float64(count) / float64(total) * 100
-				fmt.Printf("已完成: %d 总数: %d 已完成: %.2f%%\r", count, total, percentage)
-				if count == total {
-					fmt.Printf("已完成: %d 总数: %d 已完成: %.2f%%\n", count, total, percentage)
+				atomic.AddInt32(&count, 1)
+				currentCount := atomic.LoadInt32(&count)
+				percentage := float64(currentCount) / float64(total) * 100
+				fmt.Printf("已完成: %d 总数: %d 已完成: %.2f%%\r", currentCount, total, percentage)
+				if currentCount == int32(total) {
+					fmt.Printf("已完成: %d 总数: %d 已完成: %.2f%%\n", currentCount, total, percentage)
 				}
 			}()
 
@@ -208,11 +224,15 @@ func main() {
 			if err != nil {
 				return
 			}
-			defer conn.Close()
+			defer func() {
+				if err := conn.Close(); err != nil {
+					fmt.Printf("关闭连接时出错: %v\n", err)
+				}
+			}()
 
 			tcpDuration := time.Since(start)
 			if *delay > 0 && tcpDuration.Milliseconds() > int64(*delay) {
-			    return // 超过延迟阈值直接返回（仅在delay>0时生效）
+				return // 超过延迟阈值直接返回（仅在delay>0时生效）
 			}
  			
 			start = time.Now()
@@ -232,9 +252,13 @@ func main() {
 			} else {
 				protocol = "http://"
 			}
-			requestURL := protocol + requestURL
+			requestURL := protocol + *TCPurl + "/cdn-cgi/trace"
 
-			req, _ := http.NewRequest("GET", requestURL, nil)
+			req, err := http.NewRequest("GET", requestURL, nil)
+			if err != nil {
+				fmt.Printf("创建请求时出错: %v\n", err)
+				return
+			}
 
 			// 添加用户代理
 			req.Header.Set("User-Agent", "Mozilla/5.0")
@@ -246,13 +270,21 @@ func main() {
 
 			duration := time.Since(start)
 			if duration > maxDuration {
+				if err := resp.Body.Close(); err != nil {
+					fmt.Printf("关闭响应体时出错: %v\n", err)
+				}
 				return
 			}
 
-			defer resp.Body.Close()
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					fmt.Printf("关闭响应体时出错: %v\n", err)
+				}
+			}()
+			
 			buf := &bytes.Buffer{}
 			// 创建一个读取操作的超时
-			timeout := time.After(maxDuration)
+			readTimeout := time.After(maxDuration)
 			// 使用一个 goroutine 来读取响应体
 			done := make(chan bool)
 			errChan := make(chan error)
@@ -260,15 +292,13 @@ func main() {
 				_, err := io.Copy(buf, resp.Body)
 				done <- true
 				errChan <- err
-				if err != nil {
-					return
-				}
 			}()
+			
 			// 等待读取操作完成或者超时
 			select {
 			case <-done:
 				// 读取操作完成
-			case <-timeout:
+			case <-readTimeout:
 				// 读取操作超时
 				return
 			}
@@ -278,6 +308,7 @@ func main() {
 			if err != nil {
 				return
 			}
+			
 			if strings.Contains(body.String(), "uag=Mozilla/5.0") {
 				if matches := regexp.MustCompile(`colo=([A-Z]+)[\s\S]*?loc=([A-Z]+)`).FindStringSubmatch(body.String()); len(matches) > 2 {
 					dataCenter := matches[1]
@@ -306,6 +337,7 @@ func main() {
 		fmt.Println("没有发现有效的IP")
 		return
 	}
+	
 	var results []speedtestresult
 	if *speedTest > 0 {
 	    fmt.Printf("找到符合条件的ip 共%d个\n", atomic.LoadInt32(&validCount))
@@ -323,15 +355,14 @@ func main() {
 					wg2.Done()
 				}()
 				for res := range resultChan {
-
 					downloadSpeed := getDownloadSpeed(res.ip, res.port)
 					results = append(results, speedtestresult{result: res, downloadSpeed: downloadSpeed})
-
-					count++
-					percentage := float64(count) / float64(total) * 100
+					atomic.AddInt32(&count, 1)
+					currentCount := atomic.LoadInt32(&count)
+					percentage := float64(currentCount) / float64(total) * 100
 					fmt.Printf("已完成: %.2f%%\r", percentage)
-					if count == total {
-						fmt.Printf("已完成: %.2f%%\033[0\n", percentage)
+					if currentCount == int32(total) {
+						fmt.Printf("已完成: %.2f%%\n", percentage)
 					}
 				}
 			}()
@@ -358,23 +389,47 @@ func main() {
 		fmt.Printf("无法创建文件: %v\n", err)
 		return
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			fmt.Printf("关闭文件时出错: %v\n", err)
+		}
+	}()
 
+	// 写入UTF-8 BOM
+	_, err = file.WriteString("\xEF\xBB\xBF")
+	if err != nil {
+		fmt.Printf("写入BOM时出错: %v\n", err)
+		return
+	}
+	
 	writer := csv.NewWriter(file)
 	if *speedTest > 0 {
-		writer.Write([]string{"IP地址", "端口", "TLS", "数据中心", "源IP位置", "地区", "城市", "地区(中文)", "国家", "城市(中文)", "国旗", "网络延迟", "下载速度"})
+		err = writer.Write([]string{"IP地址", "端口", "TLS", "数据中心", "源IP位置", "地区", "城市", "地区(中文)", "国家", "城市(中文)", "国旗", "网络延迟", "下载速度"})
 	} else {
-		writer.Write([]string{"IP地址", "端口", "TLS", "数据中心", "源IP位置", "地区", "城市", "地区(中文)", "国家", "城市(中文)", "国旗", "网络延迟"})
+		err = writer.Write([]string{"IP地址", "端口", "TLS", "数据中心", "源IP位置", "地区", "城市", "地区(中文)", "国家", "城市(中文)", "国旗", "网络延迟"})
 	}
+	if err != nil {
+		fmt.Printf("写入CSV表头时出错: %v\n", err)
+		return
+	}
+	
 	for _, res := range results {
+		var err error
 		if *speedTest > 0 {
-			writer.Write([]string{res.result.ip, strconv.Itoa(res.result.port), strconv.FormatBool(*enableTLS), res.result.dataCenter, res.result.locCode, res.result.region, res.result.city, res.result.region_zh, res.result.country, res.result.city_zh, res.result.emoji, res.result.latency, fmt.Sprintf("%.0f kB/s", res.downloadSpeed)})
+			err = writer.Write([]string{res.result.ip, strconv.Itoa(res.result.port), strconv.FormatBool(*enableTLS), res.result.dataCenter, res.result.locCode, res.result.region, res.result.city, res.result.region_zh, res.result.country, res.result.city_zh, res.result.emoji, res.result.latency, fmt.Sprintf("%.0f kB/s", res.downloadSpeed)})
 		} else {
-			writer.Write([]string{res.result.ip, strconv.Itoa(res.result.port), strconv.FormatBool(*enableTLS), res.result.dataCenter, res.result.locCode, res.result.region, res.result.city, res.result.region_zh, res.result.country, res.result.city_zh, res.result.emoji, res.result.latency})
+			err = writer.Write([]string{res.result.ip, strconv.Itoa(res.result.port), strconv.FormatBool(*enableTLS), res.result.dataCenter, res.result.locCode, res.result.region, res.result.city, res.result.region_zh, res.result.country, res.result.city_zh, res.result.emoji, res.result.latency})
+		}
+		if err != nil {
+			fmt.Printf("写入CSV数据时出错: %v\n", err)
 		}
 	}
 
 	writer.Flush()
+	if err := writer.Error(); err != nil {
+		fmt.Printf("刷新CSV写入器时出错: %v\n", err)
+	}
+	
 	// 清除输出内容
 	fmt.Print("\033[2J")
 	fmt.Printf("有效IP数量: %d | 成功将结果写入文件 %s，耗时 %d秒\n", atomic.LoadInt32(&validCount), *outFile, time.Since(startTime)/time.Second)
@@ -386,7 +441,12 @@ func readIPs(File string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			fmt.Printf("关闭文件时出错: %v\n", err)
+		}
+	}()
+	
 	var ips []string
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -411,16 +471,6 @@ func readIPs(File string) ([]string, error) {
 	return ips, scanner.Err()
 }
 
-// inc函数实现ip地址自增
-func inc(ip net.IP) {
-	for j := len(ip) - 1; j >= 0; j-- {
-		ip[j]++
-		if ip[j] > 0 {
-			break
-		}
-	}
-}
-
 // 测速函数
 func getDownloadSpeed(ip string, port int) float64 {
 	var protocol string
@@ -430,8 +480,13 @@ func getDownloadSpeed(ip string, port int) float64 {
 		protocol = "http://"
 	}
 	speedTestURL := protocol + *speedTestURL
+	
 	// 创建请求
-	req, _ := http.NewRequest("GET", speedTestURL, nil)
+	req, err := http.NewRequest("GET", speedTestURL, nil)
+	if err != nil {
+		fmt.Printf("创建测速请求时出错: %v\n", err)
+		return 0
+	}
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 
 	// 创建TCP连接
@@ -443,10 +498,15 @@ func getDownloadSpeed(ip string, port int) float64 {
 	if err != nil {
 		return 0
 	}
-	defer conn.Close()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			fmt.Printf("关闭测速连接时出错: %v\n", err)
+		}
+	}()
 
 	fmt.Printf("正在测试IP %s 端口 %d\n", ip, port)
 	startTime := time.Now()
+	
 	// 创建HTTP客户端
 	client := http.Client{
 		Transport: &http.Transport{
@@ -457,17 +517,27 @@ func getDownloadSpeed(ip string, port int) float64 {
 		//设置单个IP测速最长时间为5秒
 		Timeout: 5 * time.Second,
 	}
+	
 	// 发送请求
 	req.Close = true
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Printf("IP %s 端口 %d 测速无效\n", ip, port)
+		fmt.Printf("IP %s 端口 %d 测速无效: %v\n", ip, port, err)
 		return 0
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			fmt.Printf("关闭测速响应体时出错: %v\n", err)
+		}
+	}()
 
 	// 复制响应体到/dev/null，并计算下载速度
-	written, _ := io.Copy(io.Discard, resp.Body)
+	written, err := io.Copy(io.Discard, resp.Body)
+	if err != nil {
+		fmt.Printf("读取测速数据时出错: %v\n", err)
+		return 0
+	}
+	
 	duration := time.Since(startTime)
 	speed := float64(written) / duration.Seconds() / 1024
 
